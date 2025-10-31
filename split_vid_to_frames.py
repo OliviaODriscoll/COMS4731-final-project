@@ -74,7 +74,7 @@ def process_all_videos(raw_data_dir, output_base_dir, frame_interval=300):
 
 # Process only barre_tripod.mov
 if __name__ == "__main__":
-    video_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/Raw Data/barre_tripod.mov"
-    output_dir = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod"
+    video_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/Raw Data/tripod_camera_calibration.mov"
+    output_dir = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/tripod_calibration/"
     
-    video_to_frames(video_path, output_dir, frame_interval=300)
+    video_to_frames(video_path, output_dir, frame_interval=200)
