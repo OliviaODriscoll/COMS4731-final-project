@@ -7,7 +7,7 @@ from skimage.util import img_as_ubyte
 
 # --- Read the specific frame ---
 frame_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod/barre_tripod_frame_02130.png"
-frame_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod/barre_tripod_frame_03600.png"
+frame_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod/barre_tripod_frame_01200.png"
 print(f"Processing frame: {frame_path}")
 
 # Read the frame
@@ -43,7 +43,7 @@ if yellow_contours:
     x, y, w, h = cv2.boundingRect(largest_yellow_contour)
     # Expand the bounding box by 150% to include nearby areas (feet, head, etc.)
     # Extra expansion downward for legs
-    expand_factor_x = 1.0
+    expand_factor_x =2.5
     expand_factor_y = 1.5  # More expansion vertically to catch legs
     x_expand = int(w * expand_factor_x)
     y_expand = int(h * expand_factor_y)
@@ -93,136 +93,99 @@ white_mask = cv2.bitwise_or(white_mask, white_lab)
 # --- Apply focus mask to white detection ---
 white_mask = cv2.bitwise_and(white_mask, focus_mask)
 
-# --- SIFT-based barre detection using template matching ---
-print("\n=== SIFT BARRE DETECTION ===")
+# --- Simple template subtraction for barre removal ---
+print("\n=== TEMPLATE SUBTRACTION BARRE REMOVAL ===")
 
 # Load the barre template image
-barre_template_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod/barre_tripod_frame_00300.png"
+barre_template_path = "/Users/olivia/Documents/COMS4731/COMS4731-final-project/frames/barre_tripod/barre_tripod_frame_03900.png"
 barre_template = cv2.imread(barre_template_path)
 
 if barre_template is None:
-    print("Could not load barre template, skipping SIFT detection")
+    print("Could not load barre template, skipping template subtraction")
     white_mask_no_barre = white_mask
     barre_mask = np.ones_like(white_mask) * 255
 else:
     print("Loaded barre template successfully")
     
-    # Initialize SIFT detector
-    sift = cv2.SIFT_create()
-    
     # Convert both images to grayscale
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray_template = cv2.cvtColor(barre_template, cv2.COLOR_BGR2GRAY)
     
-    # Detect keypoints and descriptors for both images
-    kp_template, desc_template = sift.detectAndCompute(gray_template, None)
-    kp_frame, desc_frame = sift.detectAndCompute(gray_frame, None)
+    # Resize template to match frame if needed
+    if gray_template.shape != gray_frame.shape:
+        gray_template = cv2.resize(gray_template, (gray_frame.shape[1], gray_frame.shape[0]))
+        print(f"Resized template to match frame: {gray_frame.shape}")
     
-    print(f"Template keypoints: {len(kp_template)}")
-    print(f"Frame keypoints: {len(kp_frame)}")
+    # Template matching to find the best alignment
+    print("Performing template matching for alignment...")
     
-    if desc_template is not None and desc_frame is not None:
-        # Match descriptors using FLANN matcher
-        FLANN_INDEX_KDTREE = 1
-        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-        search_params = dict(checks=50)
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
+    # Use normalized cross correlation for better matching
+    result = cv2.matchTemplate(gray_frame, gray_template, cv2.TM_CCOEFF_NORMED)
+    
+    # Find the best match location
+    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+    
+    print(f"Template matching confidence: {max_val:.3f}")
+    print(f"Best match location: {max_loc}")
+    
+    # Only use alignment if confidence is high enough
+    confidence_threshold = 0.3
+    if max_val > confidence_threshold:
+        # Create aligned template by shifting it to the best match position
+        h, w = gray_template.shape
+        aligned_template = np.zeros_like(gray_frame)
         
-        matches = flann.knnMatch(desc_template, desc_frame, k=2)
+        # Calculate shift needed
+        shift_x = max_loc[0]
+        shift_y = max_loc[1]
         
-        # Apply Lowe's ratio test with more lenient matching
-        good_matches = []
-        for match_pair in matches:
-            if len(match_pair) == 2:
-                m, n = match_pair
-                if m.distance < 0.8 * n.distance:  # More lenient ratio test
-                    good_matches.append(m)
-        
-        print(f"Found {len(good_matches)} good matches")
-        
-        # Create barre mask based on matched keypoints with additional filtering
-        barre_mask = np.ones_like(white_mask) * 255
-        height, width = frame.shape[:2]
-        
-        # Get matched keypoint locations in the frame
-        matched_kp_frame = [kp_frame[m.trainIdx] for m in good_matches]
-        
-        # Filter matches to exclude areas that are likely the person
-        filtered_matches = []
-        for kp in matched_kp_frame:
-            x, y = int(kp.pt[0]), int(kp.pt[1])
-            
-            # Only exclude if the match is:
-            # 1. On the sides of the image (where barre typically is)
-            # 2. Not in the center where the person is
-            # 3. Not in the lower half where legs are
-            is_on_side = x < width * 0.3 or x > width * 0.7
-            is_not_center = not (width * 0.3 < x < width * 0.7)
-            is_not_lower_half = y < height * 0.6
-            
-            if is_on_side and is_not_center and is_not_lower_half:
-                filtered_matches.append(kp)
-                # Create larger exclusion zone around matched barre features
-                radius = 60  # Larger radius for better coverage
-                cv2.circle(barre_mask, (x, y), radius, 0, -1)  # Black out this area
-                print(f"Excluding barre feature at ({x}, {y})")
-            else:
-                print(f"Keeping feature at ({x}, {y}) - likely person")
-        
-        # If we didn't find enough matches, use a more aggressive approach
-        if len(filtered_matches) < 5:
-            print("Not enough SIFT matches, using color-based barre detection")
-            # Look for gray/wood colored areas that are horizontal
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            # Detect horizontal lines more aggressively
-            edges = cv2.Canny(gray, 30, 100)
-            horizontal_lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
-                                             minLineLength=80, maxLineGap=20)
-            
-            if horizontal_lines is not None:
-                print(f"Found {len(horizontal_lines)} horizontal lines for barre detection")
-                for line in horizontal_lines:
-                    x1, y1, x2, y2 = line[0]
-                    # Check if line is roughly horizontal and on the sides
-                    if abs(y2 - y1) < 30:  # Nearly horizontal
-                        line_x_center = (x1 + x2) / 2
-                        if line_x_center < width * 0.3 or line_x_center > width * 0.7:  # On sides
-                            # Create thick exclusion zone around horizontal lines
-                            cv2.line(barre_mask, (x1, y1), (x2, y2), 0, 25)  # 25 pixel thick line
-                            print(f"Excluding horizontal barre line from ({x1}, {y1}) to ({x2}, {y2})")
-        
-        # Additional detection for horizontal trusses using edge detection
-        # Convert to grayscale and detect horizontal edges
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Detect horizontal edges using Sobel
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        # Find horizontal lines using Hough transform
-        edges = cv2.Canny(gray, 50, 150)
-        horizontal_lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, 
-                                         minLineLength=100, maxLineGap=10)
-        
-        if horizontal_lines is not None:
-            print(f"Found {len(horizontal_lines)} horizontal lines")
-            for line in horizontal_lines:
-                x1, y1, x2, y2 = line[0]
-                # Check if line is roughly horizontal
-                if abs(y2 - y1) < 20:  # Nearly horizontal
-                    # Create exclusion zone around horizontal lines
-                    cv2.line(barre_mask, (x1, y1), (x2, y2), 0, 15)  # 15 pixel thick line
-                    print(f"Excluding horizontal line from ({x1}, {y1}) to ({x2}, {y2})")
-        
-        print(f"Applied barre mask with {len(filtered_matches)} filtered exclusion zones")
-        
-        # Apply barre mask to white detection
-        white_mask_no_barre = cv2.bitwise_and(white_mask, barre_mask)
+        # Place template at the matched location
+        if shift_x + w <= gray_frame.shape[1] and shift_y + h <= gray_frame.shape[0]:
+            aligned_template[shift_y:shift_y+h, shift_x:shift_x+w] = gray_template
+            print(f"Aligned template with shift: ({shift_x}, {shift_y})")
+        else:
+            # If template goes out of bounds, use original template
+            aligned_template = gray_template
+            print("Template out of bounds, using original")
     else:
-        print("Could not compute descriptors, using original white mask")
-        white_mask_no_barre = white_mask
-        barre_mask = np.ones_like(white_mask) * 255
+        # Low confidence, use original template without alignment
+        aligned_template = gray_template
+        print(f"Low confidence ({max_val:.3f}), using original template without alignment")
+    
+    # Simple template subtraction with aligned template
+    # Find areas where template and frame are similar (likely barre)
+    diff = cv2.absdiff(gray_frame, aligned_template)
+    
+    # Threshold the difference to find similar areas
+    _, barre_mask_binary = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY_INV)
+    
+    # Clean up the barre mask
+    kernel_clean = np.ones((5,5), np.uint8)
+    barre_mask_binary = cv2.morphologyEx(barre_mask_binary, cv2.MORPH_CLOSE, kernel_clean)
+    barre_mask_binary = cv2.morphologyEx(barre_mask_binary, cv2.MORPH_OPEN, kernel_clean)
+    
+    # Create barre mask (white areas are kept, black areas are removed)
+    barre_mask = barre_mask_binary
+    
+    # Apply barre mask to white detection
+    white_mask_no_barre = cv2.bitwise_and(white_mask, barre_mask)
+    
+    print(f"Applied template subtraction barre removal")
+    print(f"Barre mask pixels removed: {np.sum(barre_mask == 0)}")
+    print(f"Barre mask pixels kept: {np.sum(barre_mask > 0)}")
+    
+    # Skeletonize the barre mask to visualize barre structure
+    # Since black is positive segmentation, invert the mask for skeletonization
+    barre_mask_inverted = 255 - barre_mask
+    
+    # Apply binary closing to connect barre segments before skeletonization
+    kernel_close = np.ones((5,5), np.uint8)
+    barre_mask_closed = cv2.morphologyEx(barre_mask_inverted, cv2.MORPH_CLOSE, kernel_close)
+    
+    # Skeletonize the closed barre mask
+    barre_skeleton = skeletonize(barre_mask_closed > 0)
+    barre_skeleton_uint8 = img_as_ubyte(barre_skeleton)
+    print(f"Barre skeleton pixels: {np.sum(barre_skeleton > 0)}")
 
 # Find contours in the filtered white mask
 white_contours, _ = cv2.findContours(white_mask_no_barre, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -375,24 +338,16 @@ hybrid_thresh = cv2.bitwise_and(thresh_otsu, thresh_adaptive)
 thresh = thresh_otsu      # Pure Otsu (good for global structure)
 # thresh = thresh_adaptive  # Using adaptive as it gives good body outline
 
-# --- Enhanced preprocessing before skeletonization ---
-# Fill small holes in the binary image with multiple kernel sizes
-kernel_fill_small = np.ones((3,3), np.uint8)
-kernel_fill_medium = np.ones((5,5), np.uint8)
-kernel_fill_large = np.ones((7,7), np.uint8)
+# --- Gentle preprocessing before skeletonization ---
+# Fill small holes with single kernel size
+kernel_fill = np.ones((3,3), np.uint8)
+thresh_filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_fill)
 
-# Progressive hole filling
-thresh_filled = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_fill_small)
-thresh_filled = cv2.morphologyEx(thresh_filled, cv2.MORPH_CLOSE, kernel_fill_medium)
-thresh_filled = cv2.morphologyEx(thresh_filled, cv2.MORPH_CLOSE, kernel_fill_large)
+# Remove small noise with single pass
+kernel_noise = np.ones((2,2), np.uint8)
+thresh_clean = cv2.morphologyEx(thresh_filled, cv2.MORPH_OPEN, kernel_noise)
 
-# Remove small noise with multiple passes
-kernel_noise_small = np.ones((2,2), np.uint8)
-kernel_noise_medium = np.ones((3,3), np.uint8)
-thresh_clean = cv2.morphologyEx(thresh_filled, cv2.MORPH_OPEN, kernel_noise_small)
-thresh_clean = cv2.morphologyEx(thresh_clean, cv2.MORPH_OPEN, kernel_noise_medium)
-
-# Additional smoothing to reduce jagged edges
+# Light smoothing to reduce jagged edges
 thresh_clean = cv2.medianBlur(thresh_clean, 3)
 
 # --- Convert to boolean for skeletonization ---
@@ -410,27 +365,16 @@ dist_binary = (dist_binary * 255).astype(np.uint8)
 # Skeletonize the distance-transformed image for better quality
 skeleton = skeletonize(dist_binary > 0)
 
-# --- Enhanced post-processing for skeleton cleanup ---
+# --- Gentle post-processing for skeleton cleanup ---
 # Convert to uint8 for morphological operations
 skeleton_uint8 = img_as_ubyte(skeleton)
 
-# Remove very small skeleton branches with multiple kernel sizes
-kernel_clean_1 = np.ones((2,2), np.uint8)
-kernel_clean_2 = np.ones((3,3), np.uint8)
-skeleton_clean = cv2.morphologyEx(skeleton_uint8, cv2.MORPH_OPEN, kernel_clean_1)
-skeleton_clean = cv2.morphologyEx(skeleton_clean, cv2.MORPH_OPEN, kernel_clean_2)
-
-# Remove isolated pixels and short branches
-kernel_isolated = np.ones((3,3), np.uint8)
-skeleton_final = cv2.morphologyEx(skeleton_clean, cv2.MORPH_OPEN, kernel_isolated)
-
-# Additional cleanup: remove very short skeleton segments
-# This helps remove noise while preserving important structure
-kernel_short = np.ones((2,2), np.uint8)
-skeleton_final = cv2.morphologyEx(skeleton_final, cv2.MORPH_OPEN, kernel_short)
+# Light cleanup: remove only very small noise
+kernel_clean = np.ones((2,2), np.uint8)
+skeleton_clean = cv2.morphologyEx(skeleton_uint8, cv2.MORPH_OPEN, kernel_clean)
 
 # Convert back to boolean for final processing
-skeleton = skeleton_final > 0
+skeleton = skeleton_clean > 0
 
 # --- Convert back to uint8 image for OpenCV display ---
 skeleton_uint8 = img_as_ubyte(skeleton)
@@ -461,7 +405,13 @@ visualizations = {
     "10_white_lab": white_lab,
     "11_white_before_filter": cv2.bitwise_and(cv2.bitwise_or(white_mask_hsv, cv2.bitwise_or(white_gray, white_lab)), focus_mask),
     "12_barre_template": barre_template if 'barre_template' in locals() else np.zeros_like(frame),
-    "13_barre_mask": barre_mask if 'barre_mask' in locals() else np.ones_like(frame) * 255,
+    "12a_aligned_template": aligned_template if 'aligned_template' in locals() else np.zeros_like(frame),
+    "13_template_diff": diff if 'diff' in locals() else np.zeros_like(frame),
+    "13a_barre_mask_binary": barre_mask_binary if 'barre_mask_binary' in locals() else np.zeros_like(frame),
+    "13b_barre_mask": barre_mask if 'barre_mask' in locals() else np.ones_like(frame) * 255,
+    "13c_barre_mask_inverted": barre_mask_inverted if 'barre_mask_inverted' in locals() else np.zeros_like(frame),
+    "13d_barre_mask_closed": barre_mask_closed if 'barre_mask_closed' in locals() else np.zeros_like(frame),
+    "13e_barre_skeleton": barre_skeleton_uint8 if 'barre_skeleton_uint8' in locals() else np.zeros_like(frame),
     "14_horizontal_lines": edges if 'edges' in locals() else np.zeros_like(frame),
     "15_white_after_sift": white_mask,
     "16_white_lower_half": white_lower_half if 'white_lower_half' in locals() else np.zeros_like(frame),
