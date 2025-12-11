@@ -1,3 +1,2 @@
-.DS_Store
-/dataset
-/alignment_frames
+/archive
+/*.pt
